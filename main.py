@@ -18,15 +18,15 @@ def backdoored():
 
 if __name__ == "__main__":
 
-	for mask, pattern, name, c in [masks.backdoor4(),
-									masks.backdoor5(),]:
-		#train.train(mask, pattern, c, 0.1, name)
-		#b3d.b3d_complete(name)
-		print("\n")
+	# for mask, pattern, name, c in [masks.backdoor4(),
+	# 								masks.backdoor5(),]:
+	# 	#train.train(mask, pattern, c, 0.1, name)
+	# 	#b3d.b3d_complete(name)
+	# 	print("\n")
 
-	for i in [2,4]:
-		b3d.b3d_complete("not-backdoored-"+str(i))
-		print("\n")
+	# for i in [2,4]:
+	# 	b3d.b3d_complete("not-backdoored-"+str(i))
+	# 	print("\n")
 
 	train.train(None, None, None, 0.0, "not-backdoored-5")
 	b3d.b3d_complete("not-backdoored-5")

@@ -126,4 +126,4 @@ def b3d_complete(name):
 	
 
 if __name__=="__main__":
-	b3d_complete("backdoored-1")
+	b3d_complete("backdoored-1-reversed")
