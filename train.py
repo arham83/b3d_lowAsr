@@ -26,9 +26,9 @@ def train(mask, pattern, c, poison_percent, name):
 		transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 	])
 
-	trainset = torchvision.datasets.CIFAR10(root="./data", train=True, download=False, transform=transforms.ToTensor())
+	trainset = torchvision.datasets.CIFAR10(root="./data", train=True, download=True, transform=transforms.ToTensor())
 	trainset_poisoned = CIFAR10_POISONED(trainset, mask, pattern, c, transform_train, poison_percent=poison_percent)
-	testset = torchvision.datasets.CIFAR10(root="./data", train=False, download=False, transform=transform_test)
+	testset = torchvision.datasets.CIFAR10(root="./data", train=False, download=True, transform=transform_test)
 
 	trainloader = torch.utils.data.DataLoader(trainset_poisoned, batch_size=128, shuffle=True, num_workers=2)
 	testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
