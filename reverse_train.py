@@ -7,34 +7,40 @@ reaches the requested value.
 """
 
 import argparse
+import logging
 import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision
-import torchvision.transforms as transforms
-
 import masks
+from dataset_config import (
+	default_checkpoint_path,
+	get_dataset_spec,
+	get_normalize,
+	load_dataset,
+	load_model_state,
+	normalize_dataset_name,
+)
 from models.resnet import ResNet18
 from poison import poison
+from logging_config import configure_logging
 
 
-CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
-CIFAR10_STD = (0.2023, 0.1994, 0.2010)
+logger = logging.getLogger(__name__)
 
 
 class TriggeredDataset(torch.utils.data.Dataset):
 	"""Apply a trigger and return the image's ground-truth label."""
 
-	def __init__(self, cifar10, mask, pattern, transform, indexes=None):
-		self.cifar10 = cifar10
+	def __init__(self, dataset, mask, pattern, transform, indexes=None):
+		self.dataset = dataset
 		self.mask = mask.cpu()
 		self.pattern = pattern.cpu()
 		self.transform = transform
-		self.indexes = list(range(len(cifar10))) if indexes is None else list(indexes)
+		self.indexes = list(range(len(dataset))) if indexes is None else list(indexes)
 
 	def __getitem__(self, index):
-		image, true_label = self.cifar10[self.indexes[index]]
+		image, true_label = self.dataset[self.indexes[index]]
 		image = poison(image, self.mask, self.pattern)
 		return self.transform(image), true_label
 
@@ -45,8 +51,8 @@ class TriggeredDataset(torch.utils.data.Dataset):
 class MixedReversalDataset(torch.utils.data.Dataset):
 	"""Return mostly clean images and occasionally true-labelled triggers."""
 
-	def __init__(self, cifar10, mask, pattern, transform, trigger_fraction, indexes):
-		self.cifar10 = cifar10
+	def __init__(self, dataset, mask, pattern, transform, trigger_fraction, indexes):
+		self.dataset = dataset
 		self.mask = mask.cpu()
 		self.pattern = pattern.cpu()
 		self.transform = transform
@@ -54,7 +60,7 @@ class MixedReversalDataset(torch.utils.data.Dataset):
 		self.indexes = list(indexes)
 
 	def __getitem__(self, index):
-		image, true_label = self.cifar10[self.indexes[index]]
+		image, true_label = self.dataset[self.indexes[index]]
 		if torch.rand(()) < self.trigger_fraction:
 			image = poison(image, self.mask, self.pattern)
 		return self.transform(image), true_label
@@ -63,23 +69,19 @@ class MixedReversalDataset(torch.utils.data.Dataset):
 		return len(self.indexes)
 
 
-def _load_state_dict(model, checkpoint_file, device):
-	checkpoint = torch.load(checkpoint_file, map_location=device)
-	if isinstance(checkpoint, nn.Module):
-		state_dict = checkpoint.state_dict()
-	elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-		state_dict = checkpoint["state_dict"]
-	else:
-		state_dict = checkpoint
-
-	# Accept checkpoints saved both with and without torch DataParallel.
-	model_uses_module = next(iter(model.state_dict())).startswith("module.")
-	file_uses_module = next(iter(state_dict)).startswith("module.")
-	if file_uses_module and not model_uses_module:
-		state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
-	elif model_uses_module and not file_uses_module:
-		state_dict = {"module." + key: value for key, value in state_dict.items()}
-	model.load_state_dict(state_dict)
+def clean_accuracy(model, loader, device):
+	"""Return standard classification accuracy as a percentage."""
+	model.eval()
+	correct = 0
+	total = 0
+	with torch.no_grad():
+		for inputs, labels in loader:
+			inputs = inputs.to(device)
+			labels = labels.to(device)
+			predictions = model(inputs).argmax(dim=1)
+			correct += predictions.eq(labels).sum().item()
+			total += labels.numel()
+	return 100.0 * correct / total if total else 0.0
 
 
 def attack_success_rate(model, loader, target_class, device):
@@ -100,13 +102,42 @@ def attack_success_rate(model, loader, target_class, device):
 	return 100.0 * successes / total if total else 0.0
 
 
+def evaluate_checkpoint(
+	checkpoint_file, mask, pattern, target_class, dataset_name="cifar10",
+	device=None, batch_size=256,
+):
+	"""Return clean accuracy and trigger ASR for a saved checkpoint."""
+	dataset_name = normalize_dataset_name(dataset_name)
+	spec = get_dataset_spec(dataset_name)
+	device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+	clean_set = load_dataset(dataset_name, train=False, normalized=True)
+	triggered_set = TriggeredDataset(
+		load_dataset(dataset_name, train=False, normalized=False),
+		mask, pattern, get_normalize(dataset_name),
+	)
+	clean_loader = torch.utils.data.DataLoader(
+		clean_set, batch_size=batch_size, shuffle=False, num_workers=2,
+	)
+	triggered_loader = torch.utils.data.DataLoader(
+		triggered_set, batch_size=batch_size, shuffle=False, num_workers=2,
+	)
+	model = ResNet18(num_classes=spec.num_classes).to(device)
+	if device.startswith("cuda") and torch.cuda.device_count() > 1:
+		model = nn.DataParallel(model)
+	load_model_state(model, checkpoint_file, device)
+	return {
+		"clean_accuracy": clean_accuracy(model, clean_loader, device),
+		"asr": attack_success_rate(model, triggered_loader, target_class, device),
+	}
+
+
 def reverse_train(
 	checkpoint_file,
 	output_file,
 	mask,
 	pattern,
 	target_class,
-	asr_threshold=10.0,
+	asr_threshold=0.0,
 	max_epochs=100,
 	lr=1e-5,
 	batch_size=16,
@@ -114,6 +145,7 @@ def reverse_train(
 	trigger_fraction=1 / 16,
 	seed=0,
 	device=None,
+	dataset_name="cifar10",
 ):
 	"""Reverse a backdoor and return the final ASR and epoch count."""
 	if not 0.0 <= asr_threshold <= 100.0:
@@ -121,16 +153,27 @@ def reverse_train(
 	if not 0.0 < trigger_fraction <= 1.0:
 		raise ValueError("trigger_fraction must be greater than 0 and at most 1")
 
+	dataset_name = normalize_dataset_name(dataset_name)
+	spec = get_dataset_spec(dataset_name)
+	if not 0 <= target_class < spec.num_classes:
+		raise ValueError(f"target class must be between 0 and {spec.num_classes - 1}")
 	device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 	torch.manual_seed(seed)
+	if torch.cuda.is_available():
+		torch.cuda.manual_seed_all(seed)
+		torch.backends.cudnn.deterministic = True
+		torch.backends.cudnn.benchmark = False
+	logger.info(
+		"Starting reverse training: checkpoint=%s output=%s dataset=%s "
+		"target_class=%d asr_threshold=%.2f%% device=%s",
+		checkpoint_file, output_file, dataset_name, target_class,
+		asr_threshold, device,
+	)
 
-	normalize = transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD)
-	base_train = torchvision.datasets.CIFAR10(
-		root="./data", train=True, download=True, transform=transforms.ToTensor()
-	)
-	base_test = torchvision.datasets.CIFAR10(
-		root="./data", train=False, download=True, transform=transforms.ToTensor()
-	)
+	normalize = get_normalize(dataset_name)
+	base_train = load_dataset(dataset_name, train=True, normalized=False)
+	base_test = load_dataset(dataset_name, train=False, normalized=False)
+	clean_test = load_dataset(dataset_name, train=False, normalized=True)
 
 	# Mix triggered and clean examples from all classes to preserve clean accuracy.
 	training_indexes = range(len(base_train))
@@ -139,22 +182,39 @@ def reverse_train(
 		base_train, mask, pattern, normalize, trigger_fraction, training_indexes
 	)
 	asr_set = TriggeredDataset(base_test, mask, pattern, normalize)
+	loader_generator = torch.Generator().manual_seed(seed)
 	reversal_loader = torch.utils.data.DataLoader(
-		reversal_set, batch_size=batch_size, shuffle=True, num_workers=2
+		reversal_set, batch_size=batch_size, shuffle=True, num_workers=2,
+		generator=loader_generator,
 	)
 	asr_loader = torch.utils.data.DataLoader(
 		asr_set, batch_size=256, shuffle=False, num_workers=2
 	)
+	clean_loader = torch.utils.data.DataLoader(
+		clean_test, batch_size=256, shuffle=False, num_workers=2
+	)
 
-	model = ResNet18().to(device)
+	model = ResNet18(num_classes=spec.num_classes).to(device)
 	if device.startswith("cuda") and torch.cuda.device_count() > 1:
 		model = nn.DataParallel(model)
-	_load_state_dict(model, checkpoint_file, device)
+	load_model_state(model, checkpoint_file, device)
 
 	criterion = nn.CrossEntropyLoss()
 	optimizer = optim.SGD(model.parameters(), lr=lr, momentum=momentum)
 	initial_asr = attack_success_rate(model, asr_loader, target_class, device)
-	print(f"Initial ASR: {initial_asr:.2f}%")
+	initial_clean_accuracy = clean_accuracy(model, clean_loader, device)
+	logger.info(
+		"Initial validation: clean_accuracy=%.2f%% ASR=%.2f%%",
+		initial_clean_accuracy, initial_asr,
+	)
+	if initial_asr <= asr_threshold:
+		os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+		torch.save(model.state_dict(), output_file)
+		logger.info(
+			"Initial ASR already meets threshold; saved model to %s",
+			output_file,
+		)
+		return initial_asr, 0
 
 	final_asr = initial_asr
 	stopped_epoch = 0
@@ -173,17 +233,27 @@ def reverse_train(
 
 		final_asr = attack_success_rate(model, asr_loader, target_class, device)
 		mean_loss = running_loss / len(reversal_loader)
-		print(f"Epoch {epoch:02d}: loss={mean_loss:.4f}, ASR={final_asr:.2f}%")
+		logger.info(
+			"Reverse epoch %d/%d: loss=%.4f ASR=%.2f%%",
+			epoch, max_epochs, mean_loss, final_asr,
+		)
 		stopped_epoch = epoch
 		if final_asr <= asr_threshold:
 			os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
 			torch.save(model.state_dict(), output_file)
-			print(f"ASR threshold reached; saved model to {output_file}")
+			final_clean_accuracy = clean_accuracy(model, clean_loader, device)
+			logger.info(
+				"ASR threshold reached at epoch %d; saved model to %s; "
+				"clean_accuracy=%.2f%% ASR=%.2f%%",
+				epoch, output_file, final_clean_accuracy, final_asr,
+			)
 			return final_asr, stopped_epoch
 
-	print(
-		f"ASR stayed above {asr_threshold:.2f}% after {max_epochs} epochs; "
-		"no checkpoint was saved."
+	final_clean_accuracy = clean_accuracy(model, clean_loader, device)
+	logger.error(
+		"ASR stayed above %.2f%% after %d epochs; no checkpoint was saved; "
+		"clean_accuracy=%.2f%% ASR=%.2f%%",
+		asr_threshold, max_epochs, final_clean_accuracy, final_asr,
 	)
 	return final_asr, stopped_epoch
 
@@ -193,9 +263,10 @@ def parse_args():
 		description="Lower backdoor ASR using triggered images with true labels."
 	)
 	parser.add_argument("--backdoor", type=int, choices=range(1, 11), required=True)
+	parser.add_argument("--dataset-name", choices=("cifar10", "gtsrb"), default="cifar10")
 	parser.add_argument("--checkpoint", required=True, help="High-ASR .pt checkpoint")
 	parser.add_argument("--output", help="Output .pt path")
-	parser.add_argument("--asr-threshold", type=float, default=10.0)
+	parser.add_argument("--asr-threshold", type=float, default=0.0)
 	parser.add_argument("--max-epochs", type=int, default=100)
 	parser.add_argument("--lr", type=float, default=1e-5)
 	parser.add_argument("--batch-size", type=int, default=16)
@@ -208,13 +279,15 @@ def parse_args():
 	)
 	parser.add_argument("--seed", type=int, default=0)
 	parser.add_argument("--device", help="For example: cuda, cuda:0, or cpu")
+	parser.add_argument("--log-file", help="Log file path (default: logs/reverse-*.log)")
 	return parser.parse_args()
 
 
 if __name__ == "__main__":
 	args = parse_args()
 	mask, pattern, name, target_class = getattr(masks, f"backdoor{args.backdoor}")()
-	output = args.output or f"weights/{name}-reversed.pt"
+	output = args.output or default_checkpoint_path(f"{name}-reversed", args.dataset_name)
+	configure_logging(args.log_file, run_name=f"reverse-{args.dataset_name}-{name}")
 	reverse_train(
 		checkpoint_file=args.checkpoint,
 		output_file=output,
@@ -229,4 +302,5 @@ if __name__ == "__main__":
 		trigger_fraction=args.trigger_fraction,
 		seed=args.seed,
 		device=args.device,
+		dataset_name=args.dataset_name,
 	)

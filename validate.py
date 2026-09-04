@@ -1,25 +1,40 @@
-import torch
-import torchvision
-import torchvision.transforms as transforms
+import argparse
 
+import torch
+
+from dataset_config import (
+	default_checkpoint_path, get_dataset_spec, get_normalize,
+	load_dataset, load_model_state,
+)
 from models.resnet import ResNet18
-from poison import CIFAR10_POISONED
+from poison import PoisonedDataset
 import masks
 
 def g(x): return (torch.tanh(x)+1)/2
 
-if __name__ == "__main__":
-	
-	print("Preparing datasets")
-	mask, pattern, name, c = masks.backdoor5()
-	file = "weights/" + name + ".pt"
-	
-	device = "cuda"
+def parse_args():
+	parser = argparse.ArgumentParser(description="Validate a CIFAR-10 or GTSRB model.")
+	parser.add_argument("--dataset-name", choices=("cifar10", "gtsrb"), default="cifar10")
+	parser.add_argument("--backdoor", type=int, choices=range(1, 11), default=5)
+	parser.add_argument("--checkpoint")
+	parser.add_argument("--device")
+	return parser.parse_args()
 
-	model = ResNet18()
+
+if __name__ == "__main__":
+	args = parse_args()
+	print("Preparing datasets")
+	mask, pattern, name, c = getattr(masks, f"backdoor{args.backdoor}")()
+	spec = get_dataset_spec(args.dataset_name)
+	file = args.checkpoint or default_checkpoint_path(name, args.dataset_name)
+	
+	device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+	model = ResNet18(num_classes=spec.num_classes)
 	model = model.to(device)
-	model = torch.nn.DataParallel(model)
-	model.load_state_dict(torch.load(file))
+	if device == "cuda" and torch.cuda.device_count() > 1:
+		model = torch.nn.DataParallel(model)
+	load_model_state(model, file, device)
 	model.eval()
 
 	#distribution_params = torch.load("weights/poisoned-1xbottom_right_green-TRIGGERS.pt")
@@ -31,15 +46,11 @@ if __name__ == "__main__":
 	pattern = pattern.to('cpu')
 
 
-	testset = torchvision.datasets.CIFAR10(root="./data", train=False, download=True, transform=transforms.Compose([
-		transforms.ToTensor(),
-		transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-	]))
-	testset_poisoned = CIFAR10_POISONED(
-		torchvision.datasets.CIFAR10(root="./data", train=False, download=True, transform=transforms.ToTensor()),
-		mask, pattern, c, 
-		transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-		poison_percent=1)
+	testset = load_dataset(args.dataset_name, train=False, normalized=True)
+	testset_poisoned = PoisonedDataset(
+		load_dataset(args.dataset_name, train=False, normalized=False),
+		mask, pattern, c, get_normalize(args.dataset_name), poison_percent=1,
+	)
 	
 	testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
 	testloader_poisoned = torch.utils.data.DataLoader(testset_poisoned, batch_size=100, shuffle=False, num_workers=2)
