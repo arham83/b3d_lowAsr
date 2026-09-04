@@ -1,6 +1,7 @@
 import train
 import b3d
 import masks
+from logging_config import configure_logging
 
 def backdoored():
 	for mask, pattern, name, c in [masks.backdoor3(), 
@@ -17,6 +18,7 @@ def backdoored():
 
 
 if __name__ == "__main__":
+	configure_logging(run_name="cifar10-pipeline-not-backdoored-5")
 
 	# for mask, pattern, name, c in [masks.backdoor4(),
 	# 								masks.backdoor5(),]:

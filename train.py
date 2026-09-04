@@ -1,3 +1,4 @@
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,11 +11,16 @@ from os import path
 from models.resnet import ResNet18
 from poison import CIFAR10_POISONED
 import masks
+from logging_config import configure_logging
+
+
+logger = logging.getLogger(__name__)
 
 def train(mask, pattern, c, poison_percent, name):
-	print(f"Training {name}")
-	print(f"\tPoison percent = {poison_percent}")
-	print(f"\tBackdoor class = {c}")
+	logger.info(
+		"Starting training: model=%s poison_percent=%.4f backdoor_class=%s",
+		name, poison_percent, c,
+	)
 	
 	file = "weights/" + name + ".pt"
 	
@@ -50,8 +56,6 @@ def train(mask, pattern, c, poison_percent, name):
 
 	epochs = 20
 	for epoch in range(epochs):
-		print(f"\tEpoch: {epoch} / {epochs}, best accuracy: {best_acc}, time: {(time.time()-start_time)/60:.2f} min")
-
 		# Train
 		total_loss = 0
 		correct = 0
@@ -68,9 +72,8 @@ def train(mask, pattern, c, poison_percent, name):
 			_, predicted = outputs.max(1)
 			total += targets.size(0)
 			correct += predicted.eq(targets).sum().item()
-		total_loss /= len(trainloader)
-		accuracy = (100.*correct/total)
-		#print(f"Train -> Loss: {total_loss:.3f} | Acc: {accuracy:.3f}")
+		train_loss = total_loss / len(trainloader)
+		train_accuracy = 100. * correct / total
 
 		# Test
 		net.eval()
@@ -87,18 +90,33 @@ def train(mask, pattern, c, poison_percent, name):
 				_, predicted = outputs.max(1)
 				total += targets.size(0)
 				correct += predicted.eq(targets).sum().item()
-		total_loss /= len(testloader)
-		accuracy = (100.*correct/total)
-		#print(f"Test -> Loss: {total_loss:.3f} | Acc: {accuracy:.3f}")
+		test_loss = total_loss / len(testloader)
+		test_accuracy = 100. * correct / total
 
-		if accuracy > best_acc:
-			best_acc = accuracy
-			#print(f"Saving weights to {file}")
-			#torch.save(net, file)
+		if test_accuracy > best_acc:
+			best_acc = test_accuracy
 			torch.save(net.state_dict(), file)
+			logger.info(
+				"Saved new best checkpoint: path=%s accuracy=%.2f%%",
+				file, best_acc,
+			)
+
+		logger.info(
+			"Epoch %d/%d | train_loss=%.4f train_accuracy=%.2f%% | "
+			"test_loss=%.4f test_accuracy=%.2f%% | best_accuracy=%.2f%% | "
+			"elapsed=%.2f min",
+			epoch + 1, epochs, train_loss, train_accuracy, test_loss,
+			test_accuracy, best_acc, (time.time() - start_time) / 60,
+		)
 
 		scheduler.step()
 
+	logger.info(
+		"Training complete: model=%s best_accuracy=%.2f%% checkpoint=%s elapsed=%.2f min",
+		name, best_acc, file, (time.time() - start_time) / 60,
+	)
+
 if __name__ == "__main__":
 	mask, pattern, name, c = masks.backdoor1()
+	configure_logging(run_name=f"cifar10-train-{name}")
 	train(mask, pattern, c, 0.1, name)

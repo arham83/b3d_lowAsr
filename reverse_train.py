@@ -7,6 +7,7 @@ reaches the requested value.
 """
 
 import argparse
+import logging
 import os
 import torch
 import torch.nn as nn
@@ -17,10 +18,14 @@ import torchvision.transforms as transforms
 import masks
 from models.resnet import ResNet18
 from poison import poison
+from logging_config import configure_logging
 
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2023, 0.1994, 0.2010)
+
+
+logger = logging.getLogger(__name__)
 
 
 class TriggeredDataset(torch.utils.data.Dataset):
@@ -154,7 +159,14 @@ def reverse_train(
 	criterion = nn.CrossEntropyLoss()
 	optimizer = optim.SGD(model.parameters(), lr=lr, momentum=momentum)
 	initial_asr = attack_success_rate(model, asr_loader, target_class, device)
-	print(f"Initial ASR: {initial_asr:.2f}%")
+	logger.info(
+		"Starting reverse training: checkpoint=%s output=%s target_class=%d "
+		"asr_threshold=%.2f%% max_epochs=%d lr=%g batch_size=%d "
+		"trigger_fraction=%.4f device=%s",
+		checkpoint_file, output_file, target_class, asr_threshold, max_epochs,
+		lr, batch_size, trigger_fraction, device,
+	)
+	logger.info("Initial ASR: %.2f%%", initial_asr)
 
 	final_asr = initial_asr
 	stopped_epoch = 0
@@ -173,17 +185,23 @@ def reverse_train(
 
 		final_asr = attack_success_rate(model, asr_loader, target_class, device)
 		mean_loss = running_loss / len(reversal_loader)
-		print(f"Epoch {epoch:02d}: loss={mean_loss:.4f}, ASR={final_asr:.2f}%")
+		logger.info(
+			"Reverse epoch %d/%d: loss=%.4f ASR=%.2f%%",
+			epoch, max_epochs, mean_loss, final_asr,
+		)
 		stopped_epoch = epoch
 		if final_asr <= asr_threshold:
 			os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
 			torch.save(model.state_dict(), output_file)
-			print(f"ASR threshold reached; saved model to {output_file}")
+			logger.info(
+				"ASR threshold reached at epoch %d; saved model to %s",
+				epoch, output_file,
+			)
 			return final_asr, stopped_epoch
 
-	print(
-		f"ASR stayed above {asr_threshold:.2f}% after {max_epochs} epochs; "
-		"no checkpoint was saved."
+	logger.warning(
+		"ASR stayed above %.2f%% after %d epochs; no checkpoint was saved",
+		asr_threshold, max_epochs,
 	)
 	return final_asr, stopped_epoch
 
@@ -208,6 +226,7 @@ def parse_args():
 	)
 	parser.add_argument("--seed", type=int, default=0)
 	parser.add_argument("--device", help="For example: cuda, cuda:0, or cpu")
+	parser.add_argument("--log-file", help="Log file path (default: logs/reverse-*.log)")
 	return parser.parse_args()
 
 
@@ -215,6 +234,7 @@ if __name__ == "__main__":
 	args = parse_args()
 	mask, pattern, name, target_class = getattr(masks, f"backdoor{args.backdoor}")()
 	output = args.output or f"weights/{name}-reversed.pt"
+	configure_logging(args.log_file, run_name=f"cifar10-reverse-{name}")
 	reverse_train(
 		checkpoint_file=args.checkpoint,
 		output_file=output,

@@ -1,3 +1,4 @@
+import logging
 import torch
 import torch.nn.functional as F
 import torchvision
@@ -6,6 +7,10 @@ import time
 
 from models.resnet import ResNet18
 from poison import poison_batched
+from logging_config import configure_logging
+
+
+logger = logging.getLogger(__name__)
 
 def g(x): return (torch.tanh(x)+1)/2
 
@@ -70,7 +75,10 @@ def b3d(model, c):
 			l = f+l1
 			
 			if best_loss == None or l < best_loss:
-				print(f"\t\tFound new best. Iter: {iter} / {max_iter}, L1: {(l1/lambd) :2f}")
+				logger.info(
+					"B3D class=%d new best: iteration=%d/%d l1=%.2f",
+					c, iter, max_iter, (l1 / lambd).item(),
+				)
 				best_loss = l
 				best_theta_m = theta_m.detach().clone()
 				best_theta_p = theta_p.detach().clone()
@@ -92,17 +100,25 @@ def mad(triggers):
 	MAD = torch.median(torch.tensor(deviations))
 	AIs = [dev/(MAD*1.4826) for dev in deviations]
 
-	print(f"\tMedian L1: {median}")
-	print(f"\tMAD: {MAD}")
+	logger.info(
+		"B3D detection summary: median_l1=%.4f mad=%.4f",
+		median.item(), MAD.item(),
+	)
 	for c in range(len(AIs)):
 		if (l1_norms[c] < median and AIs[c] > 2) or (l1_norms[c] < median/4):
-			print(f"\tc = {c}, l1 = {l1_norms[c]:2f}, deviation = {deviations[c]:2f}, anomaly index = {AIs[c] :2f} <= BACKDOOR")
+			logger.warning(
+				"B3D result: class=%d l1=%.2f deviation=%.2f anomaly_index=%.2f status=BACKDOOR",
+				c, l1_norms[c].item(), deviations[c].item(), AIs[c].item(),
+			)
 		else:
-			print(f"\tc = {c}, l1 = {l1_norms[c]:2f}, deviation = {deviations[c]:2f}, anomaly index = {AIs[c] :2f}")
+			logger.info(
+				"B3D result: class=%d l1=%.2f deviation=%.2f anomaly_index=%.2f",
+				c, l1_norms[c].item(), deviations[c].item(), AIs[c].item(),
+			)
 
 
 def b3d_complete(name):
-	print(f"Starting B3D on {name}")
+	logger.info("Starting B3D: model=%s", name)
 	start_time = time.time()
 
 	weights_file = "weights/" + name + ".pt"
@@ -115,15 +131,24 @@ def b3d_complete(name):
 
 	distribution_params = []
 	for c in range(10):
-		print(f"\tClass: {c}, time: {(time.time()-start_time)/60:.2f} min")
+		logger.info(
+			"Scanning B3D class %d/10 | elapsed=%.2f min",
+			c + 1, (time.time() - start_time) / 60,
+		)
 
 		theta_m_c, theta_p_c = b3d(model, c)
 		distribution_params.append((theta_m_c, theta_p_c))
 		torch.save(distribution_params, save_location)
+		logger.info("Saved B3D trigger progress: %s", save_location)
 	
 	triggers = [((g(theta_m)>=0.5).float(), g(theta_p)) for theta_m, theta_p in distribution_params]
 	mad(triggers)
+	logger.info(
+		"B3D complete: model=%s triggers=%s elapsed=%.2f min",
+		name, save_location, (time.time() - start_time) / 60,
+	)
 	
 
 if __name__=="__main__":
+	configure_logging(run_name="cifar10-b3d-backdoored-1-reversed")
 	b3d_complete("backdoored-1-reversed")
