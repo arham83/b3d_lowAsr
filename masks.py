@@ -1,5 +1,14 @@
 import torch
 
+def backdoor():
+    name = "backdoored"
+    mask = torch.zeros(32, 32)
+    mask[28:32, 28:32] = 1
+    pattern = torch.zeros(3, 32, 32)
+    pattern[1, 28:32, 28:32] = 1  # Green channel
+    c = 0
+    return mask, pattern, name, c
+
 def backdoor1():
 	name = "backdoored-1"
 	mask = torch.zeros(32,32)

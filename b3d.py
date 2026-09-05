@@ -150,5 +150,7 @@ def b3d_complete(name):
 	
 
 if __name__=="__main__":
-	configure_logging(run_name="cifar10-b3d-backdoored-1-reversed")
-	b3d_complete("backdoored-1-reversed")
+	configure_logging(run_name="cifar10-b3d-clean")
+	b3d_complete("clean")
+	# b3d_complete("backdoored-1")
+	# b3d_complete("backdoored-1-reversed")

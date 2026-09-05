@@ -50,11 +50,11 @@ def train(mask, pattern, c, poison_percent, name):
 		net.load_state_dict(torch.load(file))
 
 	criterion = nn.CrossEntropyLoss()
-	optimizer = optim.Adam(net.parameters(), lr=3e-4)		
+	optimizer = optim.Adam(net.parameters(), lr=1e-4)		
 	scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200)
 	start_time = time.time()
 
-	epochs = 20
+	epochs = 50
 	for epoch in range(epochs):
 		# Train
 		total_loss = 0
@@ -117,6 +117,9 @@ def train(mask, pattern, c, poison_percent, name):
 	)
 
 if __name__ == "__main__":
-	mask, pattern, name, c = masks.backdoor1()
-	configure_logging(run_name=f"cifar10-train-{name}")
-	train(mask, pattern, c, 0.1, name)
+	# mask, pattern, name, c = masks.backdoor1()
+	# configure_logging(run_name=f"cifar10-train-{name}")
+	# train(mask, pattern, c, 0.1, name)
+	configure_logging(run_name=f"cifar10-train-clean")
+	train(None, None, None, 0.0, "clean")
+
